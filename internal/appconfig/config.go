@@ -108,13 +108,14 @@ type Metrics struct {
 }
 
 type Deploy struct {
-	Strategy              string        `toml:"strategy,omitempty" json:"strategy,omitempty"`
-	MaxUnavailable        *float64      `toml:"max_unavailable,omitempty" json:"max_unavailable,omitempty"`
-	WaitTimeout           *fly.Duration `toml:"wait_timeout,omitempty" json:"wait_timeout,omitempty"`
-	ReleaseCommand        string        `toml:"release_command,omitempty" json:"release_command,omitempty"`
-	ReleaseCommandTimeout *fly.Duration `toml:"release_command_timeout,omitempty" json:"release_command_timeout,omitempty"`
-	ReleaseCommandCompute *Compute      `toml:"release_command_vm,omitempty" json:"release_command_vm,omitempty"`
-	SeedCommand           string        `toml:"seed_command,omitempty" json:"seed_command,omitempty"`
+	Strategy              string                  `toml:"strategy,omitempty" json:"strategy,omitempty"`
+	MaxUnavailable        *float64                `toml:"max_unavailable,omitempty" json:"max_unavailable,omitempty"`
+	WaitTimeout           *fly.Duration           `toml:"wait_timeout,omitempty" json:"wait_timeout,omitempty"`
+	ReleaseCommand        string                  `toml:"release_command,omitempty" json:"release_command,omitempty"`
+	ReleaseCommandTimeout *fly.Duration           `toml:"release_command_timeout,omitempty" json:"release_command_timeout,omitempty"`
+	ReleaseCommandCompute *Compute                `toml:"release_command_vm,omitempty" json:"release_command_vm,omitempty"`
+	SeedCommand           string                  `toml:"seed_command,omitempty" json:"seed_command,omitempty"`
+	GracefulShutdown      *GracefulShutdownConfig `toml:"graceful_shutdown,omitempty" json:"graceful_shutdown,omitempty"`
 }
 
 type File struct {
@@ -214,6 +215,15 @@ type Restart struct {
 	Policy     RestartPolicy `toml:"policy,omitempty" json:"policy,omitempty"`
 	MaxRetries int           `toml:"retries,omitempty" json:"retries,omitempty"`
 	Processes  []string      `json:"processes,omitempty" toml:"processes,omitempty"`
+}
+
+type GracefulShutdownConfig struct {
+	Enabled  bool          `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	Endpoint string        `toml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Port     int           `toml:"port,omitempty" json:"port,omitempty"`
+	Mode     string        `toml:"mode,omitempty" json:"mode,omitempty"`
+	Interval *fly.Duration `toml:"interval,omitempty" json:"interval,omitempty"`
+	Timeout  *fly.Duration `toml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 func (c *Config) ConfigFilePath() string {

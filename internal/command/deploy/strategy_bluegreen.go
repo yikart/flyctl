@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,9 +23,11 @@ import (
 
 	fly "github.com/superfly/fly-go"
 	"github.com/superfly/fly-go/flaps"
+	"github.com/superfly/flyctl/agent"
 	"github.com/superfly/flyctl/internal/appconfig"
 	"github.com/superfly/flyctl/internal/ctrlc"
 	"github.com/superfly/flyctl/internal/flapsutil"
+	"github.com/superfly/flyctl/internal/flyutil"
 	"github.com/superfly/flyctl/internal/machine"
 	"github.com/superfly/flyctl/internal/tracing"
 	"github.com/superfly/flyctl/iostreams"
@@ -85,9 +89,16 @@ type blueGreen struct {
 
 	waitBeforeStop   time.Duration
 	waitBeforeCordon time.Duration
+
+	gracefulShutdown *appconfig.GracefulShutdownConfig
 }
 
 func BlueGreenStrategy(md *machineDeployment, blueMachines []*machineUpdateEntry) *blueGreen {
+	var gracefulShutdown *appconfig.GracefulShutdownConfig
+	if md.appConfig.Deploy != nil {
+		gracefulShutdown = md.appConfig.Deploy.GracefulShutdown
+	}
+
 	bg := &blueGreen{
 		greenMachines:       machineUpdateEntries{},
 		blueMachines:        blueMachines,
@@ -107,6 +118,7 @@ func BlueGreenStrategy(md *machineDeployment, blueMachines []*machineUpdateEntry
 		maxConcurrent:       md.maxConcurrent,
 		app:                 md.app,
 		rollbackLog:         RollbackLog{canDeleteGreenMachines: true, disableRollback: false},
+		gracefulShutdown:    gracefulShutdown,
 	}
 
 	bg.initialize()
@@ -755,6 +767,17 @@ func (bg *blueGreen) Deploy(ctx context.Context) error {
 		return ErrAborted
 	}
 
+	// Wait for graceful shutdown if configured
+	if err := bg.WaitForGracefulShutdown(ctx); err != nil {
+		// Log error but don't interrupt deployment
+		tracing.RecordError(span, err, "graceful shutdown wait failed")
+		fmt.Fprintf(bg.io.ErrOut, "\nWarning: graceful shutdown wait failed: %v\n", err)
+	}
+
+	if bg.isAborted() {
+		return ErrAborted
+	}
+
 	// Wait a bit to let fly-proxy forget about the old machines
 	fmt.Fprintf(bg.io.ErrOut, "\nWaiting before stopping all blue machines\n")
 	if bg.sleepAbortable(bg.waitBeforeStop) {
@@ -982,4 +1005,290 @@ func (bg *blueGreen) TagBlueMachinesAsSafeForDeletion(ctx context.Context) error
 	}
 
 	return p.Wait()
+}
+
+func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
+	ctx, span := tracing.GetTracer().Start(ctx, "graceful_shutdown_wait")
+	defer span.End()
+
+	// Check if graceful shutdown is enabled
+	if bg.gracefulShutdown == nil || !bg.gracefulShutdown.Enabled {
+		return nil
+	}
+
+	if bg.gracefulShutdown.Endpoint == "" {
+		return fmt.Errorf("graceful shutdown endpoint is required")
+	}
+
+	// Get organization slug and establish agent connection
+	orgSlug := bg.app.Organization.Slug
+	if orgSlug == "" {
+		return fmt.Errorf("organization slug is required for graceful shutdown")
+	}
+
+	apiClient := flyutil.ClientFromContext(ctx)
+	agentClient, err := agent.Establish(ctx, apiClient)
+	if err != nil {
+		tracing.RecordError(span, err, "failed to establish agent client")
+		return fmt.Errorf("failed to establish agent client: %w", err)
+	}
+
+	dialer, err := agentClient.ConnectToTunnel(ctx, orgSlug, "", true)
+	if err != nil {
+		tracing.RecordError(span, err, "failed to connect to tunnel")
+		return fmt.Errorf("failed to connect to tunnel: %w", err)
+	}
+
+	// Create HTTP client with agent dialer
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, network, addr)
+			},
+		},
+	}
+
+	// Determine port
+	port := bg.gracefulShutdown.Port
+	if port == 0 {
+		port = bg.appConfig.InternalPort()
+		if port == 0 {
+			return fmt.Errorf("port is required for graceful shutdown")
+		}
+	}
+
+	// Determine mode (default to poll)
+	mode := bg.gracefulShutdown.Mode
+	if mode == "" {
+		mode = "poll"
+	}
+
+	// Determine interval (default to 10 seconds)
+	interval := 10 * time.Second
+	if bg.gracefulShutdown.Interval != nil {
+		interval = bg.gracefulShutdown.Interval.Duration
+	}
+
+	// Determine timeout
+	var timeout time.Duration
+	if bg.gracefulShutdown.Timeout != nil {
+		timeout = bg.gracefulShutdown.Timeout.Duration
+	} else {
+		timeout = bg.timeout // Use deployment timeout as default
+	}
+
+	fmt.Fprintf(bg.io.ErrOut, "\nWaiting for graceful shutdown of blue machines\n")
+
+	// State tracking for rendering
+	machineIDToState := map[string]string{}
+	for _, gm := range bg.blueMachines.machines() {
+		machineIDToState[gm.FormattedMachineId()] = "triggering"
+	}
+
+	render := bg.renderMachineStates(machineIDToState)
+
+	// Process each machine
+	p := pool.New().WithErrors().WithFirstError().WithMaxGoroutines(bg.maxConcurrent)
+	for _, mach := range bg.blueMachines {
+		mach := mach
+		machineID := mach.leasableMachine.FormattedMachineId()
+		privateIP := mach.leasableMachine.Machine().PrivateIP
+		if privateIP == "" {
+			bg.stateLock.Lock()
+			machineIDToState[machineID] = "no-ip"
+			bg.stateLock.Unlock()
+			render()
+			continue
+		}
+
+		p.Go(func() error {
+			if bg.isAborted() {
+				return ErrAborted
+			}
+
+			// Build URL
+			url := bg.buildGracefulShutdownURL(privateIP, port, bg.gracefulShutdown.Endpoint)
+
+			// Step 1: Trigger graceful shutdown
+			bg.stateLock.Lock()
+			machineIDToState[machineID] = "triggering"
+			bg.stateLock.Unlock()
+			render()
+
+			triggerCtx, triggerCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer triggerCancel()
+
+			req, err := http.NewRequestWithContext(triggerCtx, "GET", url, http.NoBody)
+			if err != nil {
+				return fmt.Errorf("failed to create request: %w", err)
+			}
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				// Log warning but continue
+				fmt.Fprintf(bg.io.ErrOut, "  Warning: failed to trigger graceful shutdown for machine %s: %v\n", bg.colorize.Bold(machineID), err)
+			} else {
+				resp.Body.Close()
+				// Accept 100 (Continue) or 200 as success
+				if resp.StatusCode != 100 && resp.StatusCode != 200 {
+					fmt.Fprintf(bg.io.ErrOut, "  Warning: unexpected status code %d when triggering graceful shutdown for machine %s\n", resp.StatusCode, bg.colorize.Bold(machineID))
+				}
+			}
+
+			// Step 2: Wait for graceful shutdown to complete
+			if mode == "wait" {
+				return bg.waitForGracefulShutdownComplete(ctx, httpClient, url, machineID, machineIDToState, timeout, render)
+			} else {
+				return bg.pollForGracefulShutdownComplete(ctx, httpClient, url, machineID, machineIDToState, interval, timeout, render)
+			}
+		})
+	}
+
+	if err := p.Wait(); err != nil {
+		tracing.RecordError(span, err, "graceful shutdown wait failed")
+		return err
+	}
+
+	render()
+	return nil
+}
+
+func (bg *blueGreen) buildGracefulShutdownURL(privateIP string, port int, endpoint string) string {
+	// Check if privateIP is IPv6
+	ip := net.ParseIP(privateIP)
+	if ip != nil && ip.To4() == nil {
+		// IPv6 address, wrap in brackets
+		return fmt.Sprintf("http://[%s]:%d%s", privateIP, port, endpoint)
+	}
+	return fmt.Sprintf("http://%s:%d%s", privateIP, port, endpoint)
+}
+
+func (bg *blueGreen) waitForGracefulShutdownComplete(ctx context.Context, httpClient *http.Client, url, machineID string, machineIDToState map[string]string, timeout time.Duration, render func()) error {
+	bg.stateLock.Lock()
+	machineIDToState[machineID] = "waiting"
+	bg.stateLock.Unlock()
+	render()
+
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	for {
+		if bg.isAborted() {
+			return ErrAborted
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for graceful shutdown of machine %s", machineID)
+			}
+			return waitCtx.Err()
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(waitCtx, "GET", url, http.NoBody)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			// Connection failed, retry
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		statusCode := resp.StatusCode
+		resp.Body.Close()
+
+		if statusCode == 200 {
+			// Graceful shutdown completed
+			bg.stateLock.Lock()
+			machineIDToState[machineID] = "completed"
+			bg.stateLock.Unlock()
+			render()
+			return nil
+		} else if statusCode == 100 {
+			// Still processing, continue waiting
+			time.Sleep(1 * time.Second)
+			continue
+		} else {
+			// Unexpected status, retry
+			time.Sleep(1 * time.Second)
+			continue
+		}
+	}
+}
+
+func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpClient *http.Client, url, machineID string, machineIDToState map[string]string, interval, timeout time.Duration, render func()) error {
+	bg.stateLock.Lock()
+	machineIDToState[machineID] = "polling"
+	bg.stateLock.Unlock()
+	render()
+
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		if bg.isAborted() {
+			return ErrAborted
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for graceful shutdown of machine %s", machineID)
+			}
+			return waitCtx.Err()
+		case <-ticker.C:
+			req, err := http.NewRequestWithContext(waitCtx, "GET", url, http.NoBody)
+			if err != nil {
+				return fmt.Errorf("failed to create request: %w", err)
+			}
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				// Connection failed, graceful shutdown completed
+				bg.stateLock.Lock()
+				machineIDToState[machineID] = "completed"
+				bg.stateLock.Unlock()
+				render()
+				return nil
+			}
+
+			statusCode := resp.StatusCode
+			resp.Body.Close()
+
+			if statusCode == 200 || statusCode == 100 {
+				// Still running or processing, continue polling
+				bg.stateLock.Lock()
+				if statusCode == 100 {
+					machineIDToState[machineID] = "processing"
+				} else {
+					machineIDToState[machineID] = "polling"
+				}
+				bg.stateLock.Unlock()
+				render()
+				continue
+			} else {
+				// Non-200/100 status, graceful shutdown completed
+				bg.stateLock.Lock()
+				machineIDToState[machineID] = "completed"
+				bg.stateLock.Unlock()
+				render()
+				return nil
+			}
+		}
+	}
 }
