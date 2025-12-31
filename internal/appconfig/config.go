@@ -221,7 +221,6 @@ type GracefulShutdownConfig struct {
 	Enabled  bool          `toml:"enabled,omitempty" json:"enabled,omitempty"`
 	Endpoint string        `toml:"endpoint,omitempty" json:"endpoint,omitempty"`
 	Port     int           `toml:"port,omitempty" json:"port,omitempty"`
-	Mode     string        `toml:"mode,omitempty" json:"mode,omitempty"`
 	Interval *fly.Duration `toml:"interval,omitempty" json:"interval,omitempty"`
 	Timeout  *fly.Duration `toml:"timeout,omitempty" json:"timeout,omitempty"`
 }

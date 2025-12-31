@@ -767,17 +767,6 @@ func (bg *blueGreen) Deploy(ctx context.Context) error {
 		return ErrAborted
 	}
 
-	// Wait for graceful shutdown if configured
-	if err := bg.WaitForGracefulShutdown(ctx); err != nil {
-		// Log error but don't interrupt deployment
-		tracing.RecordError(span, err, "graceful shutdown wait failed")
-		fmt.Fprintf(bg.io.ErrOut, "\nWarning: graceful shutdown wait failed: %v\n", err)
-	}
-
-	if bg.isAborted() {
-		return ErrAborted
-	}
-
 	// Wait a bit to let fly-proxy forget about the old machines
 	fmt.Fprintf(bg.io.ErrOut, "\nWaiting before stopping all blue machines\n")
 	if bg.sleepAbortable(bg.waitBeforeStop) {
@@ -790,6 +779,18 @@ func (bg *blueGreen) Deploy(ctx context.Context) error {
 	if err := bg.StopBlueMachines(ctx); err != nil {
 		tracing.RecordError(span, err, "failed to stop blue machines")
 		return errors.Join(err, ErrStopBlueMachines)
+	}
+
+	if bg.isAborted() {
+		return ErrAborted
+	}
+
+	// Wait for graceful shutdown if configured
+	// This happens after sending stop signal to allow machines to gracefully shut down
+	if err := bg.WaitForGracefulShutdown(ctx); err != nil {
+		// Log error but don't interrupt deployment
+		tracing.RecordError(span, err, "graceful shutdown wait failed")
+		fmt.Fprintf(bg.io.ErrOut, "\nWarning: graceful shutdown wait failed: %v\n", err)
 	}
 
 	fmt.Fprintf(bg.io.ErrOut, "\nWaiting for all blue machines to stop\n")
@@ -1057,12 +1058,6 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 		}
 	}
 
-	// Determine mode (default to poll)
-	mode := bg.gracefulShutdown.Mode
-	if mode == "" {
-		mode = "poll"
-	}
-
 	// Determine interval (default to 10 seconds)
 	interval := 10 * time.Second
 	if bg.gracefulShutdown.Interval != nil {
@@ -1092,6 +1087,7 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 	for _, mach := range bg.blueMachines {
 		mach := mach
 		machineID := mach.leasableMachine.FormattedMachineId()
+		realMachineID := mach.leasableMachine.Machine().ID
 		privateIP := mach.leasableMachine.Machine().PrivateIP
 		if privateIP == "" {
 			bg.stateLock.Lock()
@@ -1125,7 +1121,7 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 
 			resp, err := httpClient.Do(req)
 			if err != nil {
-				// Log warning but continue
+				// Log warning but continue with polling
 				fmt.Fprintf(bg.io.ErrOut, "  Warning: failed to trigger graceful shutdown for machine %s: %v\n", bg.colorize.Bold(machineID), err)
 			} else {
 				resp.Body.Close()
@@ -1135,12 +1131,8 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 				}
 			}
 
-			// Step 2: Wait for graceful shutdown to complete
-			if mode == "wait" {
-				return bg.waitForGracefulShutdownComplete(ctx, httpClient, url, machineID, machineIDToState, timeout, render)
-			} else {
-				return bg.pollForGracefulShutdownComplete(ctx, httpClient, url, machineID, machineIDToState, interval, timeout, render)
-			}
+			// Step 2: Poll for graceful shutdown to complete with machine state verification
+			return bg.pollForGracefulShutdownComplete(ctx, httpClient, url, machineID, realMachineID, machineIDToState, interval, timeout, render)
 		})
 	}
 
@@ -1163,70 +1155,9 @@ func (bg *blueGreen) buildGracefulShutdownURL(privateIP string, port int, endpoi
 	return fmt.Sprintf("http://%s:%d%s", privateIP, port, endpoint)
 }
 
-func (bg *blueGreen) waitForGracefulShutdownComplete(ctx context.Context, httpClient *http.Client, url, machineID string, machineIDToState map[string]string, timeout time.Duration, render func()) error {
+func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpClient *http.Client, url, machineID, realMachineID string, machineIDToState map[string]string, interval, timeout time.Duration, render func()) error {
 	bg.stateLock.Lock()
-	machineIDToState[machineID] = "waiting"
-	bg.stateLock.Unlock()
-	render()
-
-	waitCtx := ctx
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		waitCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
-	for {
-		if bg.isAborted() {
-			return ErrAborted
-		}
-
-		select {
-		case <-waitCtx.Done():
-			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("timeout waiting for graceful shutdown of machine %s", machineID)
-			}
-			return waitCtx.Err()
-		default:
-		}
-
-		req, err := http.NewRequestWithContext(waitCtx, "GET", url, http.NoBody)
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			// Connection failed, retry
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		statusCode := resp.StatusCode
-		resp.Body.Close()
-
-		if statusCode == 200 {
-			// Graceful shutdown completed
-			bg.stateLock.Lock()
-			machineIDToState[machineID] = "completed"
-			bg.stateLock.Unlock()
-			render()
-			return nil
-		} else if statusCode == 100 {
-			// Still processing, continue waiting
-			time.Sleep(1 * time.Second)
-			continue
-		} else {
-			// Unexpected status, retry
-			time.Sleep(1 * time.Second)
-			continue
-		}
-	}
-}
-
-func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpClient *http.Client, url, machineID string, machineIDToState map[string]string, interval, timeout time.Duration, render func()) error {
-	bg.stateLock.Lock()
-	machineIDToState[machineID] = "polling"
+	machineIDToState[machineID] = "checking"
 	bg.stateLock.Unlock()
 	render()
 
@@ -1240,6 +1171,21 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Helper function to check machine state
+	checkMachineState := func() (bool, error) {
+		machine, err := bg.flaps.Get(waitCtx, bg.app.Name, realMachineID)
+		if err != nil {
+			return false, fmt.Errorf("failed to get machine state: %w", err)
+		}
+
+		// If machine is stopped or stopping, graceful shutdown is complete
+		if machine.State == "stopped" || machine.State == "stopping" {
+			return true, nil
+		}
+
+		return false, nil
+	}
+
 	for {
 		if bg.isAborted() {
 			return ErrAborted
@@ -1252,6 +1198,21 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 			}
 			return waitCtx.Err()
 		case <-ticker.C:
+			// Priority: Check machine state first via API
+			stopped, err := checkMachineState()
+			if err != nil {
+				// Log warning but continue with HTTP check
+				fmt.Fprintf(bg.io.ErrOut, "  Warning: failed to check machine state for %s: %v\n", bg.colorize.Bold(machineID), err)
+			} else if stopped {
+				// Machine is stopped or stopping, no need to continue polling
+				bg.stateLock.Lock()
+				machineIDToState[machineID] = "stopped"
+				bg.stateLock.Unlock()
+				render()
+				return nil
+			}
+
+			// Only check HTTP endpoint if machine is still running
 			req, err := http.NewRequestWithContext(waitCtx, "GET", url, http.NoBody)
 			if err != nil {
 				return fmt.Errorf("failed to create request: %w", err)
@@ -1259,12 +1220,24 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 
 			resp, err := httpClient.Do(req)
 			if err != nil {
-				// Connection failed, graceful shutdown completed
+				// Connection failed, verify with machine state
+				stopped, machErr := checkMachineState()
+				if machErr == nil && stopped {
+					// Confirmed: machine is stopped
+					bg.stateLock.Lock()
+					machineIDToState[machineID] = "stopped"
+					bg.stateLock.Unlock()
+					render()
+					return nil
+				}
+
+				// Machine is still running but endpoint is not reachable
+				// App is likely shutting down
 				bg.stateLock.Lock()
-				machineIDToState[machineID] = "completed"
+				machineIDToState[machineID] = "shutting-down"
 				bg.stateLock.Unlock()
 				render()
-				return nil
+				continue
 			}
 
 			statusCode := resp.StatusCode
@@ -1276,18 +1249,30 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				if statusCode == 100 {
 					machineIDToState[machineID] = "processing"
 				} else {
-					machineIDToState[machineID] = "polling"
+					machineIDToState[machineID] = "running"
 				}
 				bg.stateLock.Unlock()
 				render()
 				continue
 			} else {
-				// Non-200/100 status, graceful shutdown completed
+				// Non-200/100 status, verify with machine state
+				stopped, machErr := checkMachineState()
+				if machErr == nil && stopped {
+					// Confirmed: machine is stopped
+					bg.stateLock.Lock()
+					machineIDToState[machineID] = "stopped"
+					bg.stateLock.Unlock()
+					render()
+					return nil
+				}
+
+				// Unexpected status but machine still running
+				// Continue polling
 				bg.stateLock.Lock()
-				machineIDToState[machineID] = "completed"
+				machineIDToState[machineID] = "shutting-down"
 				bg.stateLock.Unlock()
 				render()
-				return nil
+				continue
 			}
 		}
 	}
