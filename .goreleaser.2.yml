@@ -19,9 +19,10 @@ builds:
       - arm64
       - amd64
     ldflags:
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildVersion={{.Version}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.commit={{.ShortCommit}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildVersion={{.Version}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.branchName={{.Branch}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.commit={{.ShortCommit}}
     tags:
       - "{{.Env.BUILD_ENV}}"
 
@@ -34,9 +35,10 @@ builds:
       - arm64
       - amd64
     ldflags:
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildVersion={{.Version}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.commit={{.ShortCommit}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildVersion={{.Version}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.branchName={{.Branch}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.commit={{.ShortCommit}}
     tags:
       - "{{.Env.BUILD_ENV}}"
 
@@ -49,9 +51,10 @@ builds:
       - arm64
       - amd64
     ldflags:
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.buildVersion={{.Version}}
-      - -X github.com/yikart/flyctl/internal/buildinfo.commit={{.ShortCommit}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildDate={{.CommitDate}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.buildVersion={{.Version}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.branchName={{.Branch}}
+      - -X github.com/superfly/flyctl/internal/buildinfo.commit={{.ShortCommit}}
     tags:
       - "{{.Env.BUILD_ENV}}"
 
