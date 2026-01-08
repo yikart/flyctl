@@ -1178,8 +1178,8 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 			return false, fmt.Errorf("failed to get machine state: %w", err)
 		}
 
-		// If machine is stopped or stopping, graceful shutdown is complete
-		if machine.State == "stopped" || machine.State == "stopping" {
+		// If machine is stopped, graceful shutdown is complete
+		if machine.State == "stopped" {
 			return true, nil
 		}
 
@@ -1204,7 +1204,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				// Log warning but continue with HTTP check
 				fmt.Fprintf(bg.io.ErrOut, "  Warning: failed to check machine state for %s: %v\n", bg.colorize.Bold(machineID), err)
 			} else if stopped {
-				// Machine is stopped or stopping, no need to continue polling
+				// Machine is stopped, no need to continue polling
 				bg.stateLock.Lock()
 				machineIDToState[machineID] = "stopped"
 				bg.stateLock.Unlock()
