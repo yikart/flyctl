@@ -1061,12 +1061,14 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 	agentClient, err := agent.Establish(ctx, apiClient)
 	if err != nil {
 		tracing.RecordError(span, err, "failed to establish agent client")
+
 		return fmt.Errorf("failed to establish agent client: %w", err)
 	}
 
 	dialer, err := agentClient.ConnectToTunnel(ctx, orgSlug, "", true)
 	if err != nil {
 		tracing.RecordError(span, err, "failed to connect to tunnel")
+
 		return fmt.Errorf("failed to connect to tunnel: %w", err)
 	}
 
@@ -1124,6 +1126,7 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 			machineIDToState[machineID] = "no-ip"
 			bg.stateLock.Unlock()
 			render()
+
 			continue
 		}
 
@@ -1168,10 +1171,12 @@ func (bg *blueGreen) WaitForGracefulShutdown(ctx context.Context) error {
 
 	if err := p.Wait(); err != nil {
 		tracing.RecordError(span, err, "graceful shutdown wait failed")
+
 		return err
 	}
 
 	render()
+
 	return nil
 }
 
@@ -1182,6 +1187,7 @@ func (bg *blueGreen) buildGracefulShutdownURL(privateIP string, port int, endpoi
 		// IPv6 address, wrap in brackets
 		return fmt.Sprintf("http://[%s]:%d%s", privateIP, port, endpoint)
 	}
+
 	return fmt.Sprintf("http://%s:%d%s", privateIP, port, endpoint)
 }
 
@@ -1226,6 +1232,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 				return fmt.Errorf("timeout waiting for graceful shutdown of machine %s", machineID)
 			}
+
 			return waitCtx.Err()
 		case <-ticker.C:
 			// Priority: Check machine state first via API
@@ -1239,6 +1246,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				machineIDToState[machineID] = "stopped"
 				bg.stateLock.Unlock()
 				render()
+
 				return nil
 			}
 
@@ -1258,6 +1266,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 					machineIDToState[machineID] = "stopped"
 					bg.stateLock.Unlock()
 					render()
+
 					return nil
 				}
 
@@ -1267,6 +1276,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				machineIDToState[machineID] = "shutting-down"
 				bg.stateLock.Unlock()
 				render()
+
 				continue
 			}
 
@@ -1283,6 +1293,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				}
 				bg.stateLock.Unlock()
 				render()
+
 				continue
 			} else {
 				// Non-200/100 status, verify with machine state
@@ -1293,6 +1304,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 					machineIDToState[machineID] = "stopped"
 					bg.stateLock.Unlock()
 					render()
+
 					return nil
 				}
 
@@ -1302,6 +1314,7 @@ func (bg *blueGreen) pollForGracefulShutdownComplete(ctx context.Context, httpCl
 				machineIDToState[machineID] = "shutting-down"
 				bg.stateLock.Unlock()
 				render()
+
 				continue
 			}
 		}

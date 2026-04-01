@@ -7,7 +7,7 @@
 ```toml
 [deploy]
   strategy = "bluegreen"
-  
+
   [deploy.graceful_shutdown]
     enabled = true
     endpoint = "/shutdown"  # 必填：graceful shutdown 的 HTTP 端点
@@ -48,7 +48,7 @@
   1. 【优先】检查 Machine State（通过 Flaps API）
      - stopped/stopping → ✅ 立即完成，停止轮询
      - started → 继续检查 HTTP 端点
-  
+
   2. 检查 HTTP 端点（仅在 Machine 仍运行时）
      - 200/100 → 继续轮询（应用仍在运行/处理中）
      - 连接失败 → 双重验证 Machine State
@@ -153,7 +153,7 @@ if err != nil {
 func pollForGracefulShutdownComplete(...) error {
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
-    
+
     checkMachineState := func() (bool, error) {
         machine, err := bg.flaps.Get(waitCtx, bg.app.Name, realMachineID)
         if err != nil {
@@ -162,7 +162,7 @@ func pollForGracefulShutdownComplete(...) error {
         // 检查是否已停止
         return machine.State == "stopped" || machine.State == "stopping", nil
     }
-    
+
     for {
         select {
         case <-ticker.C:
@@ -173,7 +173,7 @@ func pollForGracefulShutdownComplete(...) error {
                 machineIDToState[machineID] = "stopped"
                 return nil
             }
-            
+
             // Machine 仍运行，检查 HTTP 端点
             resp, err := httpClient.Do(req)
             if err != nil {
@@ -186,7 +186,7 @@ func pollForGracefulShutdownComplete(...) error {
                 machineIDToState[machineID] = "shutting-down"
                 continue
             }
-            
+
             if statusCode == 200 || statusCode == 100 {
                 // 应用仍在运行
                 continue
@@ -297,16 +297,16 @@ func (s *Server) shutdownHandler(w http.ResponseWriter, r *http.Request) {
     if !s.shuttingDown.Load() {
         s.shuttingDown.Store(true)
         fmt.Println("Graceful shutdown triggered via /shutdown endpoint")
-        
+
         // 启动优雅关闭流程
         go s.gracefulShutdown()
-        
+
         // 返回 100 表示已开始处理
         w.WriteHeader(http.StatusContinue)
         fmt.Fprintf(w, "Graceful shutdown initiated")
         return
     }
-    
+
     // 后续调用：报告关闭进度
     active := s.activeConns.Load()
     if active == 0 {
@@ -323,10 +323,10 @@ func (s *Server) shutdownHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) gracefulShutdown() {
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
     defer cancel()
-    
+
     ticker := time.NewTicker(1 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -350,10 +350,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintf(w, "Server is shutting down")
         return
     }
-    
+
     s.activeConns.Add(1)
     defer s.activeConns.Add(-1)
-    
+
     // 模拟处理
     time.Sleep(100 * time.Millisecond)
     w.WriteHeader(http.StatusOK)
@@ -362,27 +362,27 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 func main() {
     server := &Server{}
-    
+
     mux := http.NewServeMux()
     mux.HandleFunc("/shutdown", server.shutdownHandler)
     mux.HandleFunc("/", server.handleRequest)
-    
+
     server.server = &http.Server{
         Addr:    ":8080",
         Handler: mux,
     }
-    
+
     // 处理 SIGTERM（Blue-Green 部署中的停止信号）
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
-    
+
     go func() {
         <-sigChan
         fmt.Println("Received SIGTERM, starting graceful shutdown")
         server.shuttingDown.Store(true)
         server.gracefulShutdown()
     }()
-    
+
     fmt.Println("Server starting on :8080")
     if err := server.server.ListenAndServe(); err != http.ErrServerClosed {
         fmt.Printf("Server error: %v\n", err)
@@ -404,14 +404,14 @@ const server = http.createServer((req, res) => {
         if (!shuttingDown) {
             shuttingDown = true;
             console.log('Graceful shutdown triggered via /shutdown endpoint');
-            
+
             // 停止接受新连接
             server.close(() => {
                 console.log('Server closed, exiting...');
                 process.exit(0);
             });
         }
-        
+
         // 报告关闭进度
         if (activeConnections === 0) {
             res.writeHead(200);
@@ -422,14 +422,14 @@ const server = http.createServer((req, res) => {
         }
         return;
     }
-    
+
     // 拒绝新请求
     if (shuttingDown) {
         res.writeHead(503);
         res.end('Server is shutting down');
         return;
     }
-    
+
     // 处理其他请求
     activeConnections++;
     setTimeout(() => {
@@ -443,7 +443,7 @@ const server = http.createServer((req, res) => {
 process.on('SIGTERM', () => {
     console.log('Received SIGTERM, starting graceful shutdown');
     shuttingDown = true;
-    
+
     server.close(() => {
         console.log('Server closed, exiting...');
         process.exit(0);
@@ -466,7 +466,7 @@ const server = http.createServer((req, res) => {
     if (req.url === '/shutdown') {
         res.writeHead(200);
         res.end('Shutting down');
-        
+
         // 关闭服务器
         server.close(() => {
             console.log('Server closed');
@@ -474,7 +474,7 @@ const server = http.createServer((req, res) => {
         });
         return;
     }
-    
+
     res.writeHead(200);
     res.end('Hello World');
 });
@@ -498,7 +498,7 @@ server.listen(8080);
 ```bash
 $ fly deploy --strategy bluegreen
 
-Verifying if app can be safely deployed 
+Verifying if app can be safely deployed
 
 Creating green machines
   Created machine 148ed21d791e98
@@ -554,11 +554,11 @@ Deployment Complete
 
 ```
 每个轮询周期：
-  
+
   1. 优先检查 Machine State
      - stopped/stopping → ✅ 立即完成，停止轮询
      - started → 继续检查 HTTP
-  
+
   2. 检查 HTTP 端点（仅在 Machine 仍运行时）
      - 200/100 → 继续轮询
      - 连接失败 → 双重验证 Machine State
@@ -584,7 +584,7 @@ Deployment Complete
 
 ---
 
-**文件位置**：`internal/command/deploy/strategy_bluegreen.go`  
+**文件位置**：`internal/command/deploy/strategy_bluegreen.go`
 **核心函数**：
 - `WaitForGracefulShutdown()` - L1010-1118：主入口，触发并轮询
 - `pollForGracefulShutdownComplete()` - L1130-1252：轮询逻辑，Machine State 优先
